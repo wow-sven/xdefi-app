@@ -1,85 +1,117 @@
 # xdefi.app
 
-React + Vite + TypeScript app using shadcn/ui.
-
-## Getting Started
-
-```bash
-npx degit hayyi2/react-shadcn-starter my-project
-cd my-project
-npm install
-npm run dev
-```
-
-## Getting Done
-
-- [x] Single page app with navigation and responsif layout
-- [x] Customable configuration `/config`
-- [x] Simple starting page/feature `/pages`
-- [x] Github action deploy github pages
-
-## Deploy `gh-pages`
-
-- change `basenameProd` in `/vite.config.ts`
-- create deploy key `GITHUB_TOKEN` in github `/settings/keys`
-- commit and push changes code
-- setup gihub pages to branch `gh-pages`
-- run action `Build & Deploy`
-
-### Auto Deploy
-
-- change file `.github/workflows/build-and-deploy.yml`
-- Comment on `workflow_dispatch`
-- Uncomment on `push`
-
-```yaml
-# on:
-#   workflow_dispatch:
-on:
-  push:
-    branches: ["main"]
-```
+Swap (and future bridge) interface for Nuwa's x402x execution engine, built with
+React, Vite, TypeScript, Tailwind CSS and shadcn/ui. Wallet connection is
+handled via WalletConnect AppKit, wagmi and viem.
 
 ## Features
 
-- React + Vite + TypeScript
-- Tailwind CSS
-- [shadcn-ui](https://github.com/shadcn-ui/ui/)
-- [react-router-dom](https://www.npmjs.com/package/react-router-dom)
+- Swap tokens across supported EVM networks using the OKX DEX Aggregator
+- Wallet connection with AppKit (`@reown/appkit`) and wagmi/viem
+- Settlement via the x402x facilitator service
+- Responsive layout with animated swap UI
+- Routes for Swap, Bridge (coming soon), FAQ and 404
 
-### Wallet Connection (AppKit + viem)
+## Getting Started
 
-This app includes wallet connection via WalletConnect AppKit (wagmi/viem).
+### Prerequisites
 
-Environment variable required at runtime:
+- Node.js 18+
+- pnpm or npm
 
+### Install and run locally
+
+```bash
+# install dependencies
+pnpm install    # or: npm install
+
+# start dev server
+pnpm dev        # or: npm run dev
 ```
-VITE_WALLETCONNECT_PROJECT_ID=your_project_id_here
+
+Vite will start on http://localhost:5173 by default.
+
+## Configuration
+
+### Client (Vite) environment
+
+Create a `.env.local` file in the project root (not committed) and set:
+
+```bash
+VITE_WALLETCONNECT_PROJECT_ID=your_walletconnect_project_id
 ```
 
-Create a project id at https://cloud.walletconnect.com.
+Without this, wallet connect falls back to a demo project id and will log a
+warning in the console.
+
+For deployments under a sub-path (for example GitHub Pages), you can also set:
+
+```bash
+VITE_BASE_URL=/xdefi.app/
+VITE_USE_HASH_ROUTE=true
+```
+
+These are wired into the `build:gh` script in `package.json`.
+
+### Server (OKX proxy) environment
+
+The `api/okx.ts` serverless function signs and forwards requests to the OKX Web3
+DEX API. Configure the following environment variables in your deployment
+environment (for example, Vercel project settings):
+
+- `OKX_BASE_URL` (optional, defaults to `https://web3.okx.com`)
+- `OKX_ACCESS_KEY`
+- `OKX_SECRET_KEY`
+- `OKX_PASSPHRASE`
+
+If these are missing, the proxy responds with an error and quotes/swaps will
+not work.
+
+## Scripts
+
+Common package scripts (see `package.json`):
+
+- `dev` – start the Vite dev server
+- `build` – type-check and build for production
+- `preview` – preview the production build locally
+- `lint` – run ESLint
+- `build:gh` – build for deployment under a sub-path (for example GitHub Pages)
 
 ## Project Structure
 
-```md
-react-shadcn-starter/
-├── public/            # Public assets
-├── src/               # Application source code
-│   ├── components/    # React components
-│   ├── context/       # contexts components
-│   ├── config/        # Config data
-│   ├── hook/          # Custom hooks
-│   ├── lib/           # Utility functions
-│   ├── pages/         # pages/features components
-│   ├── App.tsx        # Application entry point
-│   ├── index.css      # Main css and tailwind configuration
-│   ├── main.tsx       # Main rendering file
-│   └── Router.tsx     # Routes component
-├── index.html         # HTML entry point
-├── tsconfig.json      # TypeScript configuration
-└── vite.config.ts     # Vite configuration
+```text
+xdefi.app/
+├── api/                 # Serverless functions (OKX proxy)
+├── public/              # Public assets
+├── src/                 # Application source code
+│   ├── components/      # UI components (swap, layout, FAQ, nav, etc.)
+│   ├── config/          # App and SEO configuration
+│   ├── constants/       # Network, token and DEX hook metadata
+│   ├── contexts/        # Theme and Web3 providers
+│   ├── hooks/           # Swap quote, settlement and UI hooks
+│   ├── lib/             # OKX client and utilities
+│   ├── pages/           # Route-level pages (Swap, Bridge, FAQ, 404)
+│   ├── App.tsx          # Application shell and router selection
+│   ├── Router.tsx       # Route definitions
+│   ├── main.tsx         # Entry point
+│   └── index.css        # Tailwind and global styles
+├── index.html           # HTML entry point
+├── package.json         # Scripts and dependencies
+├── tsconfig*.json       # TypeScript configuration
+└── vite.config.ts       # Vite configuration
 ```
+
+## Deployment
+
+The frontend builds to static assets that can be hosted on any static platform
+(for example, Vercel, Netlify or GitHub Pages). The OKX proxy in `api/okx.ts`
+targets a Node serverless runtime compatible with `@vercel/node`; Vercel is
+supported out of the box.
+
+Update the `baseUrl` in `src/config/app.ts` and SEO settings in
+`src/config/seo.ts` if your production domain changes.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](https://github.com/hayyi2/react-shadcn-starter/blob/main/LICENSE) file for details.
+This project is licensed under the MIT License. See the `LICENSE` file for
+details.
