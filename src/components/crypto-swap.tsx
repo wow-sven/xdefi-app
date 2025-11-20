@@ -1,5 +1,19 @@
 "use client";
 
+// Wallet connection guard: use wagmi account state + AppKit modal
+// Import the shared modal instance to open on demand without using the hook
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+import AssetLogo from "@/components/asset-logo";
+import {
+  NATIVE_TOKEN_ADDRESS,
+  SUPPORTED_NETWORKS,
+  SUPPORTED_PAYMENT_TOKENS,
+} from "@/constants/networks";
+import { useSwapQuoteExactIn } from "@/hooks/use-swap-quote";
+import { useSwapSettlement } from "@/hooks/use-swap-settlement";
+import { useTargetAssets } from "@/hooks/use-target-assets";
+import { cn } from "@/lib/utils";
 import { modal as appKitModal } from "@reown/appkit/react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -15,20 +29,6 @@ import {
 import React, { useEffect, useRef, useState } from "react";
 // no direct viem parsing here; handled inside hooks
 import { useAccount, useBalance } from "wagmi";
-// Wallet connection guard: use wagmi account state + AppKit modal
-// Import the shared modal instance to open on demand without using the hook
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore
-import AssetLogo from "@/components/asset-logo";
-import {
-  NATIVE_TOKEN_ADDRESS,
-  SUPPORTED_NETWORKS,
-  SUPPORTED_PAYMENT_TOKENS,
-} from "@/constants/networks";
-import { useSwapQuoteExactIn } from "@/hooks/use-swap-quote";
-import { useSwapSettlement } from "@/hooks/use-swap-settlement";
-import { useTargetAssets } from "@/hooks/use-target-assets";
-import { cn } from "@/lib/utils";
 
 // Hook for click outside functionality
 function useClickOutside(
@@ -92,6 +92,9 @@ interface SwapState {
   isLoading: boolean;
   status: "idle" | "loading" | "success" | "error";
   error?: string;
+  // Last on-chain transaction details for the most recent swap attempt
+  lastTxHash?: string;
+  lastTxUrl?: string;
 }
 
 // Build networks from the SDK's supported list (constants are already filtered to mainnet only).
@@ -193,13 +196,13 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
     if (!nextTo) return;
     setSwapState((prev) => {
       const prevAddr = prev.toToken?.address?.toLowerCase?.();
-      const nextTokens = (nextTo.tokens as any[]) ?? [];
+      const nextTokens = (nextTo.tokens) ?? [];
       const matched =
         nextTokens.find((t) => t?.address?.toLowerCase?.() === prevAddr) ??
-        (nextTokens[0] as any);
+        (nextTokens[0]);
       return {
         ...prev,
-        toNetwork: nextTo as any,
+        toNetwork: nextTo,
         toToken: matched,
       };
     });
@@ -215,32 +218,55 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
   const settingsRef = useRef<HTMLDivElement>(null);
 
   // Helpers to map our network ids to chainIds used by wagmi
-  const chainId = React.useMemo(() => {
-    return (
+  const chainId = React.useMemo(
+    () =>
       SUPPORTED_NETWORKS.find((n) => n.network === swapState.fromNetwork?.id)
-        ?.chainId ?? undefined
-    );
-  }, [swapState.fromNetwork?.id]);
+        ?.chainId ?? undefined,
+    [swapState.fromNetwork?.id],
+  );
 
-  // Live balances from connected wallet for selected tokens (ERC-20)
+  // Determine whether the current tokens represent native assets (using the OKX
+  // canonical "native" address). For native assets, wagmi's useBalance expects
+  // `token` to be omitted/undefined so it queries the chain's native balance.
+  const isFromTokenNative =
+    swapState.fromToken?.address?.toLowerCase() ===
+    NATIVE_TOKEN_ADDRESS.toLowerCase();
+  const isToTokenNative =
+    swapState.toToken?.address?.toLowerCase() ===
+    NATIVE_TOKEN_ADDRESS.toLowerCase();
+
+  // Live balances from connected wallet for selected tokens
+  // - ERC-20 tokens: pass token address
+  // - Native token (0xEeee... sentinel): omit token so wagmi reads native balance
   // We scope reads to the currently selected tokens to avoid spamming RPCs.
   const fromBalance = useBalance({
     address,
-    token: swapState.fromToken?.address as `0x${string}`,
+    token: isFromTokenNative
+      ? undefined
+      : (swapState.fromToken?.address as `0x${string}`),
     chainId: chainId,
     query: {
       enabled: Boolean(
-        isConnected && address && chainId && swapState.fromToken?.address,
+        isConnected &&
+        address &&
+        chainId &&
+        // For native balance reads, we only require that the token is marked native
+        (isFromTokenNative || swapState.fromToken?.address),
       ),
     },
   });
   const toBalance = useBalance({
     address,
-    token: swapState.toToken?.address as `0x${string}`,
+    token: isToTokenNative
+      ? undefined
+      : (swapState.toToken?.address as `0x${string}`),
     chainId: chainId,
     query: {
       enabled: Boolean(
-        isConnected && address && chainId && swapState.toToken?.address,
+        isConnected &&
+        address &&
+        chainId &&
+        (isToTokenNative || swapState.toToken?.address),
       ),
     },
   });
@@ -251,6 +277,13 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
     const [ints, decs = ""] = String(v).split(".");
     const trimmed = decs.replace(/0+$/, "").slice(0, 6); // max 6 decimals
     return trimmed ? `${ints}.${trimmed}` : ints;
+  }
+
+  // Shorten long hex strings (e.g., transaction hashes) for display
+  function shortHex(v?: string, visibleChars = 4): string {
+    if (!v) return "";
+    if (v.length <= 2 + visibleChars * 2) return v;
+    return `${v.slice(0, 2 + visibleChars)}…${v.slice(-visibleChars)}`;
   }
 
   // Compact USD formatting for trade fee; trims trailing zeros and caps decimals
@@ -305,9 +338,9 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
     if (!toNetworks || toNetworks.length === 0) return;
     setHasFetchedToTokens(true);
     setSelectorNetwork((prev) => {
-      if (!prev) return toNetworks[0] as any;
+      if (!prev) return toNetworks[0];
       const found = toNetworks.find((n) => n.id === prev.id);
-      return (found as any) || toNetworks[0];
+      return (found) || toNetworks[0];
     });
   }, [showTokenSelector, toNetworks]);
 
@@ -357,7 +390,7 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
 
   // removed token swap toggle; for bridge/swap targets come from hook
 
-  const { execute, status: settleStatus } = useSwapSettlement();
+  const { execute, status: settleStatus, lastResult } = useSwapSettlement();
 
   // Map execute() status to UI state flags
   useEffect(() => {
@@ -366,7 +399,7 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
       "preparing",
       "signing",
       "submitting",
-    ].includes(settleStatus as any);
+    ].includes(settleStatus);
     const status =
       settleStatus === "success"
         ? "success"
@@ -378,7 +411,37 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
 
     const userError =
       status === "error" ? "Swap failed. Please try again." : undefined;
-    setSwapState((prev) => ({ ...prev, isLoading, status, error: userError }));
+
+    // Attach last transaction details (hash + explorer URL) when a swap finishes
+    let lastTxHash: string | undefined;
+    let lastTxUrl: string | undefined;
+    if (settleStatus === "success" || settleStatus === "error") {
+      lastTxHash = lastResult?.transaction;
+      if (lastTxHash && lastResult?.network) {
+        const netCfg = SUPPORTED_NETWORKS.find(
+          (n) => n.network === lastResult.network,
+        );
+        if (netCfg?.txExplorerBaseUrl) {
+          lastTxUrl = `${netCfg.txExplorerBaseUrl}${lastTxHash}`;
+        }
+      }
+    }
+
+    setSwapState((prev) => ({
+      ...prev,
+      isLoading,
+      status,
+      error: userError,
+      // Clear tx details while a swap is in-flight; set them when it finishes
+      lastTxHash:
+        settleStatus === "success" || settleStatus === "error"
+          ? lastTxHash
+          : undefined,
+      lastTxUrl:
+        settleStatus === "success" || settleStatus === "error"
+          ? lastTxUrl
+          : undefined,
+    }));
 
     if (settleStatus === "success") {
       setSwapState((prev) => ({ ...prev, fromAmount: "", toAmount: "" }));
@@ -387,7 +450,7 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
       }, 2000);
       return () => clearTimeout(t);
     }
-  }, [settleStatus]);
+  }, [settleStatus, lastResult]);
 
   const handleSwap = async () => {
     if (!swapState.fromAmount || Number(swapState.fromAmount) <= 0) return;
@@ -412,7 +475,7 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
     });
   };
 
-  const containerVariants: any = {
+  const containerVariants = {
     hidden: { opacity: 0, y: 20, scale: 0.95 },
     visible: {
       opacity: 1,
@@ -428,7 +491,7 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
     },
   };
 
-  const itemVariants: any = {
+  const itemVariants = {
     hidden: { opacity: 0, x: -20, filter: "blur(4px)" },
     visible: {
       opacity: 1,
@@ -443,7 +506,7 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
     },
   };
 
-  const glowVariants: any = {
+  const glowVariants = {
     idle: { opacity: 0 },
     hover: {
       opacity: 1,
@@ -556,9 +619,14 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
                   placeholder="0.0"
                   value={swapState.fromAmount}
                   onChange={(e) => {
+                    const value = e.target.value;
                     setSwapState((prev) => ({
                       ...prev,
-                      fromAmount: e.target.value,
+                      fromAmount: value,
+                      // Clear any previous swap result/error message when user edits amount
+                      error: undefined,
+                      lastTxHash: undefined,
+                      lastTxUrl: undefined,
                     }));
                   }}
                   className="min-w-0 flex-1 bg-transparent text-right text-2xl font-semibold outline-none placeholder:text-muted-foreground"
@@ -755,9 +823,32 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
               )}
             </div>
           </motion.button>
-          {swapState.status === "error" && swapState.error && (
-            <div className="mt-2 text-sm text-red-500 text-center break-words">
-              {String(swapState.error)}
+          {(swapState.error || swapState.lastTxHash) && (
+            <div className="mt-2 text-sm text-center break-words">
+              {swapState.error && (
+                <div className="text-red-500 mb-1">
+                  {String(swapState.error)}
+                </div>
+              )}
+              {swapState.lastTxHash && (
+                <div className="text-muted-foreground">
+                  Your transaction hash:{" "}
+                  {swapState.lastTxUrl ? (
+                    <a
+                      href={swapState.lastTxUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="underline font-mono"
+                    >
+                      {shortHex(swapState.lastTxHash)}
+                    </a>
+                  ) : (
+                    <span className="font-mono">
+                      {shortHex(swapState.lastTxHash)}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </motion.div>
@@ -836,9 +927,9 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
                         ? swapState.fromNetwork
                         : (toNetworks.find(
                           (n) => n.id === swapState.toNetwork.id,
-                        ) as any) || swapState.toNetwork)
+                        )) || swapState.toNetwork)
                     ).tokens
-                      .filter((token: any) => {
+                      .filter((token: Token) => {
                         const q = tokenSearch.trim().toLowerCase();
                         if (!q) return true;
                         return (
@@ -848,12 +939,12 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
                       })
                       // For 'to' side, ensure the currently selected 'from' token is excluded
                       .filter(
-                        (token: any) =>
+                        (token: Token) =>
                           showTokenSelector !== "to" ||
                           token.address.toLowerCase() !==
                           (swapState.fromToken?.address || "").toLowerCase(),
                       )
-                      .map((token: any, index: number) => (
+                      .map((token: Token, index: number) => (
                         <motion.button
                           key={token.address}
                           className="w-full flex items-center gap-3 p-3 rounded-xl hover:bg-muted/50 transition-colors"
@@ -868,7 +959,7 @@ function CryptoSwapBase({ networks }: { networks?: Network[] }) {
                             kind="token"
                             id={token.symbol}
                             size={36}
-                            src={(token as any).logoUrl}
+                            src={token.logoUrl}
                           />
                           <div className="flex-1 text-left">
                             <div className="font-semibold">{token.symbol}</div>
