@@ -16,6 +16,7 @@ export function AppNav() {
     <nav className="fixed left-1/2 top-4 z-50 flex w-fit -translate-x-1/2 items-center gap-4 rounded-lg border border-neutral-700 bg-neutral-900/95 px-3 py-2 text-sm text-neutral-400 shadow-lg">
       <ThemeSwitch />
       <AppNavLink to="/swap">Swap</AppNavLink>
+      <AppNavLink to="/bnb-wrap">BNB-Wrap</AppNavLink>
       <AppNavLink to="/bridge">Bridge</AppNavLink>
       <AppNavLink to="/faq">FAQ</AppNavLink>
 

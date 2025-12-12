@@ -4,6 +4,7 @@ import NotMatch from './pages/NotMatch'
 import SwapPage from './pages/Swap'
 import BridgePage from './pages/Bridge'
 import FAQPage from './pages/FAQ'
+import BNBWrapPage from './pages/BNB-Wrap'
 
 export default function Router() {
     return (
@@ -11,6 +12,7 @@ export default function Router() {
             <Route element={<AppLayout />}>
                 <Route path="" element={<SwapPage />} />
                 <Route path="swap" element={<SwapPage />} />
+                <Route path="bnb-wrap" element={<BNBWrapPage />} />
                 <Route path="bridge" element={<BridgePage />} />
                 <Route path="faq" element={<FAQPage />} />
                 <Route path="*" element={<NotMatch />} />
