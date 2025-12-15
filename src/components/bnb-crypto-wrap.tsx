@@ -13,17 +13,15 @@ import { modal as appKitModal } from "@reown/appkit/react";
 import { motion } from "framer-motion";
 import {
   AlertCircle,
-  ArrowDown,
+  ArrowLeftRight,
   CheckCircle,
-  ChevronDown,
   Loader2,
-  Settings,
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 // no direct viem parsing here; handled inside hooks
 import { useAccount, useBalance, useWriteContract, useWaitForTransactionReceipt, useReadContract, useChainId, useSwitchChain } from "wagmi";
-import { parseUnits } from "viem";
+import { parseUnits, maxUint256 } from "viem";
 
 interface Network {
   chainId: number; 
@@ -32,6 +30,7 @@ interface Network {
   usdcAddress: string;
   fromToken: Token;
   toToken: Token;
+  scan: string;
 }
 
 // Network configurations: Mainnet and Testnet
@@ -41,6 +40,7 @@ const NETWORK_CONFIG: Record<"mainnet" | "testnet", Network> = {
     name: "BNB Smart Chain",
     wrapContract: "0x5a2dce590df31613c2945baf22c911992087af57", // 主网合约地址（需要替换为实际地址）
     usdcAddress: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", // BSC 主网 USDC
+    scan: "https://bscscan.com/tx",
     fromToken: {
       symbol: "USDC",
       name: "USDC",
@@ -63,24 +63,25 @@ const NETWORK_CONFIG: Record<"mainnet" | "testnet", Network> = {
   testnet: {
     chainId: 97,
     name: "BNB Smart Chain Testnet",
-    wrapContract: "0x5a2dce590df31613c2945baf22c911992087af57", // 测试网合约地址
-    usdcAddress: "0x64544969ed7EBf5f083679233325356EbE738930", // BSC 测试网 USDC
+    wrapContract: "0xb4BE1a12A1d4Aac09974586027D95F51419d68B6", // 测试网合约地址
+    usdcAddress: "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd", // BSC 测试网 USDT
+    scan: "https://testnet.bscscan.com/tx",
     fromToken: {
-      symbol: "USDC",
-      name: "USDC",
+      symbol: "USDT",
+      name: "USDT",
       balance: "0",
       price: 1,
       change24h: 0,
-      address: "0x64544969ed7EBf5f083679233325356EbE738930",
+      address: "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd",
       decimals: 18,
     },
     toToken: {
-      symbol: "USDC",
-      name: "USDC",
+      symbol: "USDTX",
+      name: "USDtX",
       balance: "0",
       price: 1,
       change24h: 0,
-      address: "0x221c5B1a293aAc1187ED3a7D7d2d9aD7fE1F3FB0",
+      address: "0xb4BE1a12A1d4Aac09974586027D95F51419d68B6",
       decimals: 18,
     },
   },
@@ -115,6 +116,13 @@ const WRAP_CONTRACT_ABI = [
   {
     inputs: [{ name: "amount", type: "uint256" }],
     name: "wrap",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [{ name: "amount", type: "uint256" }],
+    name: "unwrap",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",
@@ -165,23 +173,44 @@ function CryptoSwapBase() {
   // Network selection state
   const [selectedNetwork, setSelectedNetwork] = useState<"mainnet" | "testnet">("testnet");
   
+  // Wrap/Unwrap mode state
+  const [isWrapMode, setIsWrapMode] = useState<boolean>(true); // true = wrap, false = unwrap
+  
   const network = useMemo(() => buildNetworksFromSDK(selectedNetwork), [selectedNetwork]);
   
   // Get current network config
   const currentNetworkConfig = NETWORK_CONFIG[selectedNetwork];
   const WrapContract = currentNetworkConfig.wrapContract;
+  
+  // Determine tokens based on mode
+  // Wrap: fromToken (USDC) -> toToken (wrapped USDC)
+  // Unwrap: fromToken (wrapped USDC) -> toToken (USDC)
+  const fromToken = isWrapMode ? network.fromToken : network.toToken;
+  const toToken = isWrapMode ? network.toToken : network.fromToken;
+  
   // to networks come from API (mock hook for now). We'll compute after state init.
   const [swapState, setSwapState] = useState<SwapState>({
     fromNetwork: network,
     toNetwork: network, // temp init, will update once hook resolves
-    fromToken: network.fromToken,
-    // Default to the OKX-native address; metadata will be enriched when token list is fetched
-    toToken: network.toToken,
+    fromToken: fromToken,
+    toToken: toToken,
     fromAmount: "",
     toAmount: "",
     isLoading: false,
     status: "idle",
   });
+  
+  // Update tokens when mode changes
+  useEffect(() => {
+    setSwapState((prev) => ({
+      ...prev,
+      fromToken: isWrapMode ? network.fromToken : network.toToken,
+      toToken: isWrapMode ? network.toToken : network.fromToken,
+      fromAmount: "",
+      toAmount: "",
+      error: undefined,
+    }));
+  }, [isWrapMode, network]);
 
   // Amount editing is restricted to the 'from' side; 'to' is always derived.
   // no-op swap animation; we no longer flip from/to in UI
@@ -189,6 +218,9 @@ function CryptoSwapBase() {
   const [isHovering, setIsHovering] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const prevApprovingRef = useRef(false);
+  const prevWrappingRef = useRef(false);
+  const hasCalledWrapAfterApproveRef = useRef(false);
 
   // Helpers to map our network ids to chainIds used by wagmi
   const chainId = currentNetworkConfig.chainId;
@@ -219,23 +251,6 @@ function CryptoSwapBase() {
     }
   };
   
-  // Update swapState when network changes
-  // useEffect(() => {
-  //   const newNetwork = fromNetworks[0];
-  //   if (newNetwork) {
-  //     setSwapState((prev) => ({
-  //       ...prev,
-  //       fromNetwork: newNetwork,
-  //       fromToken: newNetwork.tokens[0],
-  //       toNetwork: newNetwork,
-  //       toToken: newNetwork.tokens[0],
-  //       fromAmount: "",
-  //       toAmount: "",
-  //       error: undefined,
-  //     }));
-  //   }
-  // }, [fromNetworks]);
-
   // Auto-switch network when selected network changes (only if connected)
   useEffect(() => {
     if (isConnected && !isCorrectNetwork && !isSwitchingChain) {
@@ -261,7 +276,8 @@ function CryptoSwapBase() {
         : (`0x${swapState.fromToken.address}` as `0x${string}`))
     : undefined;
   
-  const { data: allowance } = useReadContract({
+  // Only check allowance in wrap mode (unwrap doesn't need approval)
+  const { data: allowance, refetch: refetchAllowance } = useReadContract({
     address: tokenAddressForAllowance,
     abi: ERC20_ABI,
     functionName: "allowance",
@@ -273,30 +289,185 @@ function CryptoSwapBase() {
         address &&
         tokenAddressForAllowance &&
         !isFromTokenNative &&
-        chainId,
+        chainId &&
+        isWrapMode, // Only check allowance in wrap mode
       ),
     },
   });
-  console.log("allowance", allowance);
 
   // Write contract hooks
   const { writeContract: approveToken, data: approveHash, isPending: isApproving, error: approveError } = useWriteContract();
-  const { writeContract: wrapToken, data: wrapHash, isPending: isWrapping } = useWriteContract();
-
-  console.log("approveError", approveError);
-  console.log("approveHash", approveHash);
+  const { writeContract: wrapOrUnwrapToken, data: wrapHash, isPending: isWrapping, error: wrapError } = useWriteContract();
 
   // Wait for approve transaction
-  const { isLoading: isWaitingApprove, isSuccess: isApproveSuccess } = useWaitForTransactionReceipt({
+  const { isLoading: isWaitingApprove, isSuccess: isApproveSuccess, isError: isApproveReceiptError, error: approveReceiptError } = useWaitForTransactionReceipt({
     hash: approveHash,
     chainId: chainId,
   });
 
   // Wait for wrap transaction
-  const { isLoading: isWaitingWrap, isSuccess: isWrapSuccess } = useWaitForTransactionReceipt({
+  const { isLoading: isWaitingWrap, isSuccess: isWrapSuccess, isError: isWrapReceiptError, error: wrapReceiptError } = useWaitForTransactionReceipt({
     hash: wrapHash,
     chainId: chainId,
   });
+
+  // Handle approve errors (user rejection, transaction failure, etc.)
+  useEffect(() => {
+    if (approveError) {
+      const errorMessage = approveError.message || String(approveError);
+      const isUserRejected = 
+        errorMessage.toLowerCase().includes('user rejected') ||
+        errorMessage.toLowerCase().includes('user denied') ||
+        errorMessage.toLowerCase().includes('rejected') ||
+        errorMessage.toLowerCase().includes('cancelled') ||
+        errorMessage.toLowerCase().includes('action rejected');
+      
+      // Check for RPC errors
+      const isRpcError = 
+        errorMessage.toLowerCase().includes('rpc endpoint') ||
+        errorMessage.toLowerCase().includes('http client error') ||
+        errorMessage.toLowerCase().includes('network error') ||
+        errorMessage.toLowerCase().includes('fetch failed') ||
+        errorMessage.toLowerCase().includes('timeout');
+      
+      let displayError = "";
+      if (isUserRejected) {
+        displayError = "Transaction cancelled by user";
+      } else if (isRpcError) {
+        displayError = `RPC connection error. Please check your network connection and try again. If the problem persists, the RPC endpoint may be temporarily unavailable.`;
+      } else {
+        displayError = `Approval failed: ${errorMessage}`;
+      }
+      
+      setSwapState((prev) => ({
+        ...prev,
+        isLoading: false,
+        status: "error",
+        error: displayError,
+      }));
+    }
+  }, [approveError]);
+
+  // Handle wrap/unwrap errors (user rejection, transaction failure, etc.)
+  useEffect(() => {
+    if (wrapError) {
+      // Reset the flag on error so user can retry
+      hasCalledWrapAfterApproveRef.current = false;
+      const errorMessage = wrapError.message || String(wrapError);
+      const isUserRejected = 
+        errorMessage.toLowerCase().includes('user rejected') ||
+        errorMessage.toLowerCase().includes('user denied') ||
+        errorMessage.toLowerCase().includes('rejected') ||
+        errorMessage.toLowerCase().includes('cancelled') ||
+        errorMessage.toLowerCase().includes('action rejected');
+      
+      // Check for RPC errors
+      const isRpcError = 
+        errorMessage.toLowerCase().includes('rpc endpoint') ||
+        errorMessage.toLowerCase().includes('http client error') ||
+        errorMessage.toLowerCase().includes('network error') ||
+        errorMessage.toLowerCase().includes('fetch failed') ||
+        errorMessage.toLowerCase().includes('timeout');
+      
+      let displayError = "";
+      if (isUserRejected) {
+        displayError = "Transaction cancelled by user";
+      } else if (isRpcError) {
+        displayError = `RPC connection error. Please check your network connection and try again. If the problem persists, the RPC endpoint may be temporarily unavailable.`;
+      } else {
+        displayError = `${isWrapMode ? 'Wrap' : 'Unwrap'} failed: ${errorMessage}`;
+      }
+      
+      setSwapState((prev) => ({
+        ...prev,
+        isLoading: false,
+        status: "error",
+        error: displayError,
+      }));
+    }
+  }, [wrapError, isWrapMode]);
+
+  // Handle approve transaction receipt errors
+  useEffect(() => {
+    if (isApproveReceiptError && approveReceiptError) {
+      const errorMessage = approveReceiptError.message || String(approveReceiptError);
+      
+      // Check for RPC errors
+      const isRpcError = 
+        errorMessage.toLowerCase().includes('rpc endpoint') ||
+        errorMessage.toLowerCase().includes('http client error') ||
+        errorMessage.toLowerCase().includes('network error') ||
+        errorMessage.toLowerCase().includes('fetch failed') ||
+        errorMessage.toLowerCase().includes('timeout');
+      
+      const displayError = isRpcError
+        ? `RPC connection error while checking transaction status. The transaction may have been submitted. Please check the blockchain explorer.`
+        : `Approval transaction failed: ${errorMessage}`;
+      
+      setSwapState((prev) => ({
+        ...prev,
+        isLoading: false,
+        status: "error",
+        error: displayError,
+      }));
+    }
+  }, [isApproveReceiptError, approveReceiptError]);
+
+  // Handle wrap transaction receipt errors
+  useEffect(() => {
+    if (isWrapReceiptError && wrapReceiptError) {
+      const errorMessage = wrapReceiptError.message || String(wrapReceiptError);
+      
+      // Check for RPC errors
+      const isRpcError = 
+        errorMessage.toLowerCase().includes('rpc endpoint') ||
+        errorMessage.toLowerCase().includes('http client error') ||
+        errorMessage.toLowerCase().includes('network error') ||
+        errorMessage.toLowerCase().includes('fetch failed') ||
+        errorMessage.toLowerCase().includes('timeout');
+      
+      const displayError = isRpcError
+        ? `RPC connection error while checking transaction status. The transaction may have been submitted. Please check the blockchain explorer.`
+        : `Transaction failed: ${errorMessage}`;
+      
+      setSwapState((prev) => ({
+        ...prev,
+        isLoading: false,
+        status: "error",
+        error: displayError,
+      }));
+    }
+  }, [isWrapReceiptError, wrapReceiptError]);
+
+  // Handle case where isPending becomes false without success or error (user cancellation without error)
+  useEffect(() => {
+    // Track when isPending transitions from true to false
+    const wasApproving = prevApprovingRef.current;
+    const wasWrapping = prevWrappingRef.current;
+    
+    // If we were pending and now we're not, and no hash was generated, likely cancelled
+    if (wasApproving && !isApproving && !approveHash && !isApproveSuccess && !approveError && swapState.isLoading) {
+      setSwapState((prev) => ({
+        ...prev,
+        isLoading: false,
+        status: "error",
+        error: "Approval was cancelled",
+      }));
+    }
+    
+    if (wasWrapping && !isWrapping && !wrapHash && !isWrapSuccess && !wrapError && swapState.isLoading) {
+      setSwapState((prev) => ({
+        ...prev,
+        isLoading: false,
+        status: "error",
+        error: `${isWrapMode ? 'Wrap' : 'Unwrap'} was cancelled`,
+      }));
+    }
+    
+    // Update refs
+    prevApprovingRef.current = isApproving;
+    prevWrappingRef.current = isWrapping;
+  }, [isApproving, isWrapping, approveHash, wrapHash, isApproveSuccess, isWrapSuccess, approveError, wrapError, swapState.isLoading, isWrapMode]);
 
   // Live balances from connected wallet for selected tokens
   // - ERC-20 tokens: pass token address
@@ -333,6 +504,10 @@ function CryptoSwapBase() {
       ),
     },
   });
+  
+  // Get refetch functions for balance updates
+  const refetchFromBalance = fromBalance.refetch;
+  const refetchToBalance = toBalance.refetch;
 
   // Render-friendly string (trim trailing zeros, keep a few decimals)
   function fmtBalance(v?: string): string {
@@ -371,25 +546,101 @@ function CryptoSwapBase() {
   }, [isHovering]);
 
 
-  // Handle approve success - automatically call wrap
+  // Handle approve success - automatically call wrap/unwrap
   useEffect(() => {
-    if (isApproveSuccess && swapState.fromAmount && address) {
+    // Only call wrap once after approve succeeds, and only if we haven't already called it
+    if (isApproveSuccess && swapState.fromAmount && address && isWrapMode && isCorrectNetwork && !hasCalledWrapAfterApproveRef.current && !wrapHash) {
       const decimals = swapState.fromToken?.decimals ?? 18;
       const amountRaw = parseUnits(swapState.fromAmount, decimals);
+      const amountBigInt = BigInt(amountRaw.toString());
       
-      wrapToken({
-        address: WrapContract as `0x${string}`,
-        abi: WRAP_CONTRACT_ABI,
-        functionName: "wrap",
-        args: [amountRaw],
-        chainId: chainId,
-      });
+      // Wait for allowance to update on-chain, then verify it's sufficient before calling wrap
+      const checkAndWrap = async () => {
+        let retries = 0;
+        const maxRetries = 5;
+        
+        while (retries < maxRetries) {
+          // Refetch allowance to get the latest value
+          const { data: latestAllowance } = await refetchAllowance();
+          const currentAllowance = latestAllowance ? BigInt(latestAllowance.toString()) : 0n;
+          
+          // Check if allowance is sufficient - use amountRaw (the actual value being wrapped)
+          // Note: amountRaw and amountBigInt should be the same, but we use amountRaw to be safe
+          const wrapAmount = BigInt(amountRaw.toString());
+          
+          // Some contracts may require slightly more allowance due to internal calculations or rounding
+          // Add a small buffer (0.1%) to account for any precision issues or contract requirements
+          // This matches the approval buffer we use when approving
+          const requiredAllowance = (wrapAmount * 1001n) / 1000n;
+          
+          // Verify the allowance is sufficient with a small margin for safety
+          // We check >= requiredAllowance to ensure we have enough, even with potential rounding
+          if (currentAllowance >= requiredAllowance) {
+            // Mark that we've called wrap to prevent duplicate calls
+            hasCalledWrapAfterApproveRef.current = true;
+            
+            try {
+              wrapOrUnwrapToken({
+                address: WrapContract as `0x${string}`,
+                abi: WRAP_CONTRACT_ABI,
+                functionName: "wrap",
+                args: [wrapAmount],
+                chainId: chainId,
+              });
+            } catch (error) {
+              // Reset the flag on error so user can retry
+              hasCalledWrapAfterApproveRef.current = false;
+              const errorMessage = error instanceof Error ? error.message : String(error);
+              console.error("Wrap call error:", error);
+              setSwapState((prev) => ({
+                ...prev,
+                isLoading: false,
+                status: "error",
+                error: `Failed to initiate wrap: ${errorMessage}`,
+              }));
+            }
+            return; // Success, exit the retry loop
+          } else {
+            const requiredAllowance = (wrapAmount * 1001n) / 1000n;
+            console.warn("Allowance insufficient:", {
+              currentAllowance: currentAllowance.toString(),
+              wrapAmount: wrapAmount.toString(),
+              requiredAllowance: requiredAllowance.toString(),
+              difference: currentAllowance >= wrapAmount 
+                ? "0 (exact match, but buffer needed)" 
+                : (wrapAmount - currentAllowance).toString(),
+            });
+          }
+          
+          // Wait before retrying
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          retries++;
+        }
+        
+        // If we've exhausted retries and allowance is still insufficient
+        hasCalledWrapAfterApproveRef.current = false;
+        setSwapState((prev) => ({
+          ...prev,
+          isLoading: false,
+          status: "error",
+          error: `Allowance insufficient. Current: ${allowance?.toString() || "0"}, Required: ${amountBigInt.toString()}. Please try approving again.`,
+        }));
+      };
+      
+      // Start checking after a short delay to allow blockchain state to update
+      const timer = setTimeout(() => {
+        checkAndWrap();
+      }, 1000);
+      
+      return () => clearTimeout(timer);
     }
-  }, [isApproveSuccess, swapState.fromAmount, address, swapState.fromToken?.decimals, wrapToken, chainId]);
+  }, [isApproveSuccess, swapState.fromAmount, address, swapState.fromToken?.decimals, wrapOrUnwrapToken, chainId, isWrapMode, isCorrectNetwork, wrapHash, refetchAllowance]);
 
   // Handle wrap success
   useEffect(() => {
     if (isWrapSuccess) {
+      // Reset the flag when wrap succeeds
+      hasCalledWrapAfterApproveRef.current = false;
       setSwapState((prev) => ({
         ...prev,
         status: "success",
@@ -397,6 +648,19 @@ function CryptoSwapBase() {
         error: undefined,
         lastTxHash: wrapHash,
       }));
+      
+      // Refresh balances after a short delay to allow blockchain state to update
+      const refreshBalances = async () => {
+        // Wait a bit for the blockchain state to update
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Refetch both balances
+        await Promise.all([
+          refetchFromBalance(),
+          refetchToBalance(),
+        ]);
+      };
+      refreshBalances();
+      
       // Reset form after 2 seconds
       const timer = setTimeout(() => {
         setSwapState((prev) => ({
@@ -408,10 +672,9 @@ function CryptoSwapBase() {
       }, 2000);
       return () => clearTimeout(timer);
     }
-  }, [isWrapSuccess, wrapHash]);
+  }, [isWrapSuccess, wrapHash, refetchFromBalance, refetchToBalance]);
 
   const handleSwap = async () => {
-    console.log("handleSwap");
     if (!swapState.fromAmount || Number(swapState.fromAmount) <= 0) return;
     if (!isConnected) {
       try {
@@ -451,6 +714,9 @@ function CryptoSwapBase() {
       return;
     }
 
+    // Reset the wrap call flag when starting a new swap
+    hasCalledWrapAfterApproveRef.current = false;
+    
     // Set loading state
     setSwapState((prev) => ({
       ...prev,
@@ -464,39 +730,94 @@ function CryptoSwapBase() {
       const amountRaw = parseUnits(swapState.fromAmount, decimals);
       const amountBigInt = BigInt(amountRaw.toString());
 
-      // Ensure token address has 0x prefix
-      const tokenAddress = swapState.fromToken.address.startsWith("0x")
-        ? (swapState.fromToken.address as `0x${string}`)
-        : (`0x${swapState.fromToken.address}` as `0x${string}`);
+      if (isWrapMode) {
+        // Wrap mode: need to approve first
+        // Ensure token address has 0x prefix
+        const tokenAddress = swapState.fromToken.address.startsWith("0x")
+          ? (swapState.fromToken.address as `0x${string}`)
+          : (`0x${swapState.fromToken.address}` as `0x${string}`);
 
-      // Check if we need to approve
-      const currentAllowance = allowance ? BigInt(allowance.toString()) : 0n;
-      
-      if (currentAllowance < amountBigInt) {
-        // Need to approve first
-        approveToken({
-          address: tokenAddress,
-          abi: ERC20_ABI,
-          functionName: "approve",
-          args: [WrapContract as `0x${string}`, amountBigInt],
-          chainId: chainId,
+        // Check if we need to approve
+        const currentAllowance = allowance ? BigInt(allowance.toString()) : 0n;
+        
+        // Debug logging
+        console.log("Wrap check:", {
+          currentAllowance: currentAllowance.toString(),
+          amountBigInt: amountBigInt.toString(),
+          amountRaw: amountRaw.toString(),
+          wrapContract: WrapContract,
+          tokenAddress: tokenAddress,
+          fromAmount: swapState.fromAmount,
+          decimals: decimals,
         });
+        
+        // Approve maximum amount (type(uint256).max) to avoid needing to re-approve for each transaction
+        // This is a common pattern in DeFi and allows the contract to use any amount up to the user's balance
+        const maxApproval = maxUint256;
+        
+        if (currentAllowance < amountBigInt) {
+          // Reset the flag when starting a new approve
+          hasCalledWrapAfterApproveRef.current = false;
+          // Approve maximum amount for convenience - user won't need to approve again
+          console.log("Approving maximum amount:", {
+            tokenAddress,
+            spender: WrapContract,
+            amount: maxApproval.toString(),
+            chainId,
+          });
+          approveToken({
+            address: tokenAddress,
+            abi: ERC20_ABI,
+            functionName: "approve",
+            args: [WrapContract as `0x${string}`, maxApproval],
+            chainId: chainId,
+          });
+        } else {
+          // Already approved, call wrap directly
+          console.log("Calling wrap directly:", {
+            address: WrapContract,
+            amount: amountBigInt.toString(),
+            chainId,
+          });
+          wrapOrUnwrapToken({
+            address: WrapContract as `0x${string}`,
+            abi: WRAP_CONTRACT_ABI,
+            functionName: "wrap",
+            args: [amountBigInt],
+            chainId: chainId,
+          });
+        }
       } else {
-        // Already approved, call wrap directly
-        wrapToken({
+        // Unwrap mode: no approval needed, directly call unwrap
+        wrapOrUnwrapToken({
           address: WrapContract as `0x${string}`,
           abi: WRAP_CONTRACT_ABI,
-          functionName: "wrap",
+          functionName: "unwrap",
           args: [amountBigInt],
           chainId: chainId,
         });
       }
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Check for RPC errors
+      const isRpcError = 
+        errorMessage.toLowerCase().includes('rpc endpoint') ||
+        errorMessage.toLowerCase().includes('http client error') ||
+        errorMessage.toLowerCase().includes('network error') ||
+        errorMessage.toLowerCase().includes('fetch failed') ||
+        errorMessage.toLowerCase().includes('timeout') ||
+        errorMessage.toLowerCase().includes('connection');
+      
+      const displayError = isRpcError
+        ? `RPC connection error. Please check your network connection and try again. If the problem persists, the RPC endpoint may be temporarily unavailable.`
+        : errorMessage || "Transaction failed";
+      
       setSwapState((prev) => ({
         ...prev,
         status: "error",
         isLoading: false,
-        error: error instanceof Error ? error.message : "Transaction failed",
+        error: displayError,
       }));
     }
   };
@@ -582,9 +903,11 @@ function CryptoSwapBase() {
                 <Zap className="w-5 h-5 text-white" />
               </motion.div>
               <div>
-                <h1 className="text-xl font-bold text-foreground">Wrap</h1>
+                <h1 className="text-xl font-bold text-foreground">
+                  {isWrapMode ? "Wrap" : "Unwrap"}
+                </h1>
                 <p className="text-sm text-muted-foreground">
-                  Wrap tokens instantly
+                  {isWrapMode ? "Wrap tokens instantly" : "Unwrap tokens instantly"}
                 </p>
               </div>
             </div>
@@ -659,12 +982,9 @@ function CryptoSwapBase() {
                 <motion.button
                   className="flex items-start gap-2 bg-background/50 rounded-xl px-3 py-2 hover:bg-background/80 transition-colors shrink-0"
                 >
-                  <AssetLogo
-                    kind="token"
-                    id={swapState.fromToken.symbol}
-                    size={36}
-                    src={swapState.fromToken.logoUrl}
-                  />
+                  <div className="w-9 h-9 rounded-full bg-gradient-to-r from-blue-500 to-purple-600 flex items-center justify-center text-white font-semibold text-sm">
+                    {swapState.fromToken.symbol.charAt(0)}
+                  </div>
                   <div className="flex flex-col leading-tight items-start justify-start">
                     <span className="font-semibold">
                       {swapState.fromToken.symbol}
@@ -704,15 +1024,16 @@ function CryptoSwapBase() {
             className="flex justify-center -my-1 relative z-10"
             variants={itemVariants}
           >
-            <motion.div
-              className="w-12 h-12 bg-gradient-to-r from-blue-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg"
+            <motion.button
+              className="w-12 h-12 bg-gradient-to-r from-blue-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg hover:from-blue-600 hover:to-purple-700 transition-colors"
               whileTap={{ scale: 0.9 }}
+              whileHover={{ scale: 1.05 }}
               transition={{ type: "spring", stiffness: 300, damping: 25 }}
+              onClick={() => setIsWrapMode(!isWrapMode)}
+              title={isWrapMode ? "Switch to Unwrap" : "Switch to Wrap"}
             >
-              <ArrowDown className="w-5 h-5 text-white" onClick={() => {
-                console.log("arrow down");
-              }}/>
-            </motion.div>
+              <ArrowLeftRight className="w-5 h-5 text-white" />
+            </motion.button>
           </motion.div>
 
           {/* To Token */}
@@ -748,19 +1069,16 @@ function CryptoSwapBase() {
                   <motion.button
                   className="flex items-start gap-2 bg-background/50 rounded-xl px-3 py-2 hover:bg-background/80 transition-colors shrink-0"
                 >
-                  <AssetLogo
-                    kind="token"
-                    id={swapState.fromToken.symbol}
-                    size={36}
-                    src={swapState.fromToken.logoUrl}
-                  />
+                  <div className="w-9 h-9 rounded-full bg-gradient-to-r from-blue-500 to-purple-600 flex items-center justify-center text-white font-semibold text-sm">
+                    {swapState.toToken.symbol.charAt(0)}
+                  </div>
                   <div className="flex flex-col leading-tight items-start justify-start">
                     <span className="font-semibold">
-                      {swapState.fromToken.symbol}
+                      {swapState.toToken.symbol}
                     </span>
                     <span className="text-xs text-muted-foreground flex items-center gap-2">
                       <span className="truncate max-w-[8rem] sm:max-w-[10rem]">
-                        {swapState.fromNetwork.name}
+                        {swapState.toNetwork.name}
                       </span>
                     </span>
                   </div>
@@ -774,7 +1092,6 @@ function CryptoSwapBase() {
                     className="min-w-0 flex-1 bg-transparent text-right text-2xl font-semibold outline-none placeholder:text-muted-foreground cursor-default"
                   />
                 </>
-                  
                 )}
               </div>
             </div>
@@ -827,7 +1144,7 @@ function CryptoSwapBase() {
               ) : swapState.status === "success" ? (
                 <>
                   <CheckCircle className="w-5 h-5" />
-                  Wwap Successful!
+                  {isWrapMode ? "Wrap" : "Unwrap"} Successful!
                 </>
               ) : swapState.status === "error" ? (
                 <>
