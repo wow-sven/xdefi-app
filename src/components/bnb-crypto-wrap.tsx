@@ -38,33 +38,33 @@ const NETWORK_CONFIG: Record<"mainnet" | "testnet", Network> = {
   mainnet: {
     chainId: 56,
     name: "BNB Smart Chain",
-    wrapContract: "0x5a2dce590df31613c2945baf22c911992087af57", // 主网合约地址（需要替换为实际地址）
-    usdcAddress: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", // BSC 主网 USDC
+    wrapContract: "0x2fDb94bAa9D664a1879BEe1f944F5F5d2dad4451",
+    usdcAddress: "0x55d398326f99059ff775485246999027b3197955", 
     scan: "https://bscscan.com/tx",
     fromToken: {
-      symbol: "USDC",
-      name: "USDC",
+      symbol: "USDT",
+      name: "USDT",
       balance: "0",
       price: 1,
       change24h: 0,
-      address: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+      address: "0x55d398326f99059ff775485246999027b3197955",
       decimals: 18,
     },
     toToken: {
-      symbol: "USDC",
-      name: "USDC",
+      symbol: "USDTX",
+      name: "USDTX",
       balance: "0",
       price: 1,
       change24h: 0,
-      address: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+      address: "0x2fdb94baa9d664a1879bee1f944f5f5d2dad4451",
       decimals: 18,
     },
   },
   testnet: {
     chainId: 97,
     name: "BNB Smart Chain Testnet",
-    wrapContract: "0xb4BE1a12A1d4Aac09974586027D95F51419d68B6", // 测试网合约地址
-    usdcAddress: "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd", // BSC 测试网 USDT
+    wrapContract: "0xb4BE1a12A1d4Aac09974586027D95F51419d68B6", 
+    usdcAddress: "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd",
     scan: "https://testnet.bscscan.com/tx",
     fromToken: {
       symbol: "USDT",
