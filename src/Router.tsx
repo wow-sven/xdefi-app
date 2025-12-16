@@ -4,7 +4,7 @@ import NotMatch from './pages/NotMatch'
 import SwapPage from './pages/Swap'
 import BridgePage from './pages/Bridge'
 import FAQPage from './pages/FAQ'
-import BNBWrapPage from './pages/BNB-Wrap'
+import BNBWrapPage from './pages/bnb-wrap'
 
 export default function Router() {
     return (
